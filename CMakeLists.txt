@@ -42,6 +42,9 @@ set(CLIENT_HEADER_LIST
         )
 set(CLIENT_REQUIRED_LIBRARIES_LIST
         )
+set(ECHO_HEADER_LIST
+        ${INCLUDE_DIR}/main.c
+        )
 set(ECHO_SOURCE_LIST
         ${SOURCE_DIR}/echo.c
         )
