@@ -873,7 +873,7 @@ static void process_message(const struct dc_env *env, struct dc_error *err, stru
 
         raw_data = NULL;
         worker->message_handler.reader(env, err, &raw_data, client_socket, &packet_info);
-        closed = true; // set it to true so if the client forgets to set it the connection is closed
+        closed = true; // set it to true so if the client forgets to set it the connection
         if(dc_error_has_no_error(err))
         {
             uint8_t *processed_data;
@@ -1104,50 +1104,217 @@ void open_file(const struct dc_env *env, struct dc_error *err, struct http_packe
 
 void process_message_handler(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo)
 {
+    DC_TRACE(env);
 
+    printf("String \n%s \n", httpPacketInfo->data);
+
+    // Setup packet info and process the HTTP message Check the method of the request
+    get_method(env, err, httpPacketInfo, dc_strdup(env, err, httpPacketInfo->data));
+
+    if (dc_strcmp(env, httpPacketInfo->method, "GET") == 0 || dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
+        get_path(env, err, httpPacketInfo,dc_strdup(env, err, httpPacketInfo->data));
+        check_if_modified_since(env, err, httpPacketInfo, dc_strdup(env, err, httpPacketInfo->data));
+        open_file(env, err, httpPacketInfo);
+    } else if (dc_strcmp(env, httpPacketInfo->method, "POST") == 0) {
+        // Process POST request here but not done !!!!!!!!!!!!!!!!!!!!!
+    } else {
+        // Not a valid method
+        httpPacketInfo->error = 1;
+    }
 }
 
 char * get_http_time(const struct dc_env *env, struct dc_error *err) {
+    // Get current time
+    char time_stamp[BUFFER_SIZE];
+    time_t now = time(0);
+    struct tm tm = *gmtime(&now);
+    strftime(time_stamp, sizeof time_stamp, "%a, %d %b %Y %H:%M:%S %Z\r\n", &tm);
 
+    // Format time into HTTP format
+    char date[BUFFER_SIZE] = "";
+    dc_strcat(env, date,  "Date: ");
+    dc_strcat(env, date, time_stamp);
+
+    // Return date
+    return dc_strdup(env, err, date);
 }
 
 char * get_last_modified_time(const struct dc_env *env, struct dc_error *err, const struct http_packet_info *httpPacketInfo)
 {
+    // Format time into HTTP format
+    char date[BUFFER_SIZE] = "";
+    dc_strcat(env, date,  "Last-Modified: ");
+    dc_strcat(env, date, httpPacketInfo->file_last_modified);
 
+    // Return date
+    return dc_strdup(env, err, date);
 }
 
 char * create_bad_request_packet(const struct dc_env *env, struct dc_error *err) {
+    char * http_time = get_http_time(env, err);
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 400 BAD REQUEST\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
+    dc_strcat(env, data,  "<html>400 BAD REQUEST, ONLY SUPPORTS HTTP 1.0 FUNCTIONS (GET, HEAD, POST)</html>\r\n");
 
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
 }
 
 char * create_404_packet(const struct dc_env *env, struct dc_error *err) {
+    char * http_time = get_http_time(env, err);
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 404 NOT FOUND\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
+    dc_strcat(env, data,  "<html>404 NOT FOUND</html>\r\n");
 
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
 }
 char * head_create_404_packet(const struct dc_env *env, struct dc_error *err) {
+    char * http_time = get_http_time(env, err);
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 404 NOT FOUND\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
 
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
 }
 
 void copy(int from_fd, int to_fd, size_t count)
 {
+    char *buffer;
+    ssize_t rbytes;
 
+    buffer = malloc(count);
+
+    if(buffer == NULL)
+    {
+        fprintf(stderr, "Malloc Failed\n");
+        return;
+    }
+
+    while((rbytes = read(from_fd, buffer, count)) > 0)
+    {
+        ssize_t wbytes;
+
+        wbytes = write(to_fd, buffer, rbytes);
+
+        if(wbytes == -1)
+        {
+            fprintf(stderr, "File Write Error\n");
+            return;
+        }
+    }
+
+    if(rbytes == -1)
+    {
+        fprintf(stderr, "File Read Error\n");
+        return;
+    }
+    free(buffer);
 }
 
 char * send_header_information(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo, const char * status_code_message)
 {
+    char * last_modified_time = get_last_modified_time(env, err, httpPacketInfo);
 
+    // Convert file size to string
+    char * http_time = get_http_time(env, err);
+    char str[20] = "";
+    snprintf(str, sizeof(str), "%lld", (long long) httpPacketInfo->file_size);  // Convert the off_t value to a string
+
+    // Create packet
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 ");
+    dc_strcat(env, data,  status_code_message);
+    dc_strcat(env, data,  "\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  last_modified_time);
+    dc_strcat(env, data,  "Content-Length: ");
+    dc_strcat(env, data,  str);
+    dc_strcat(env, data,  "\r\n");
+    dc_strcat(env, data,  "Content-Type: */*\r\n\r\n");
+    printf("RESP: \n%s", data);
+
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
 }
 
 void send_get(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
+    // Send file
+    char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
+    dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+    copy(httpPacketInfo->read_fd, client_socket, httpPacketInfo->file_size);
+    dc_write_fully(env, err, client_socket, "\r\n", 2);
+    dc_free(env, data);
 
 }
 
 void send_get_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
+    // Check if request is conditional
+    if (httpPacketInfo->is_conditional_get)
+    {
+        struct tm tm1, tm2;
+        time_t t1, t2;
 
+        // Parse the timestamps into struct tm format
+        if (strptime(httpPacketInfo->if_modified_since, "%a, %d %b %Y %H:%M:%S GMT", &tm1) == NULL) {
+            fprintf(stderr, "Invalid timestamp format: %s\n", httpPacketInfo->if_modified_since);
+            return;
+        }
+        printf("IS MOD: %s \n", httpPacketInfo->file_last_modified);
+        if (strptime(httpPacketInfo->file_last_modified, "%a, %d %b %Y %H:%M:%S GMT", &tm2) == NULL) {
+            fprintf(stderr, "Invalid timestamp format: %s\n", get_last_modified_time(env, err, httpPacketInfo));
+            return;
+        }
+
+        // Convert the timestamps to time_t format
+        t1 = mktime(&tm1);
+        t2 = mktime(&tm2);
+
+        // If not modified since request date send 304
+        // Compare the timestamps
+        if (t2 > t1)
+        {
+            send_get(env, err, client_socket, httpPacketInfo);
+        } else if (t1 > t2)
+        {
+            char * data = send_header_information(env, err, httpPacketInfo, "304 NOT MODIFIED");
+            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+            dc_write_fully(env, err, client_socket, "\r\n", 2);
+            dc_free(env, data);
+            return;
+        } else
+        {
+            char * data = head_create_404_packet(env, err);
+            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+            dc_free(env, data);
+            return;
+        }
+    } else
+    {
+        send_get(env, err, client_socket, httpPacketInfo);
+    }
 }
 
 void send_head_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo)
 {
-
+    // Send header information
+    char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
+    dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+    dc_write_fully(env, err, client_socket, "\r\n", 2);
+    dc_free(env, data);
 }
 
 void send_message_handler(const struct dc_env *env, struct dc_error *err, int client_socket, bool *closed, struct http_packet_info * httpPacketInfo)
