@@ -445,3 +445,208 @@ char * create_201_packet(const struct dc_env *env, struct dc_error *err) {
     return dc_strdup(env, err, data);
 }
 
+char * create_204_packet(const struct dc_env *env, struct dc_error *err) {
+    char * http_time = get_http_time(env, err);
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 204 NO CONTENT\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
+
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
+}
+
+void copy(int from_fd, int to_fd, size_t count)
+{
+    char *buffer;
+    ssize_t rbytes;
+
+    buffer = malloc(count);
+
+    if(buffer == NULL)
+    {
+        fprintf(stderr, "Malloc Error\n");
+        return;
+    }
+
+    while((rbytes = read(from_fd, buffer, count)) > 0)
+    {
+        ssize_t wbytes;
+
+        wbytes = write(to_fd, buffer, rbytes);
+
+        if(wbytes == -1)
+        {
+            fprintf(stderr, "File Write Error\n");
+            return;
+        }
+    }
+
+    if(rbytes == -1)
+    {
+        fprintf(stderr, "File Read Error\n");
+        return;
+    }
+    free(buffer);
+}
+
+char * send_header_information(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo, const char * status_code_message)
+{
+    char * last_modified_time = get_last_modified_time(env, err, httpPacketInfo);
+
+    // Convert file size to string
+    char * http_time = get_http_time(env, err);
+    char str[20] = "";
+    snprintf(str, sizeof(str), "%lld", (long long) httpPacketInfo->file_size);  // Convert the off_t value to a string // NOLINT(cert-err33-c)
+
+    // Create packet
+    char data[BUFFER_SIZE] = "";
+    dc_strcat(env, data,  "HTTP/1.0 ");
+    dc_strcat(env, data,  status_code_message);
+    dc_strcat(env, data,  "\r\n");
+    dc_strcat(env, data,  http_time);
+    dc_strcat(env, data,  "Server: webserver-c\r\n");
+    dc_strcat(env, data,  last_modified_time);
+    dc_strcat(env, data,  "Content-Length: ");
+    dc_strcat(env, data,  str);
+    dc_strcat(env, data,  "\r\n");
+    dc_strcat(env, data,  "Content-Type: */*\r\n\r\n");
+
+    dc_free(env, http_time);
+    return dc_strdup(env, err, data);
+}
+
+void send_get_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
+    // Check if request is conditional
+    if (httpPacketInfo->response_type == NOT_MODIFIED)
+    {
+        char * data = send_header_information(env, err, httpPacketInfo, "304 NOT MODIFIED");
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        dc_write_fully(env, err, client_socket, "\r\n", 2);
+        dc_free(env, data);
+        return;
+    } else if (httpPacketInfo->response_type == NOT_FOUND) // NOLINT(llvm-else-after-return,readability-else-after-return)
+    {
+        char * data = create_404_header_packet(env, err);
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        dc_free(env, data);
+        return;
+    } else if (httpPacketInfo->response_type == OK) // NOLINT(llvm-else-after-return,readability-else-after-return)
+    {
+        // Send file
+        char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        copy(httpPacketInfo->read_fd, client_socket, httpPacketInfo->file_size);
+        dc_write_fully(env, err, client_socket, "\r\n", 2);
+        dc_free(env, data);
+        return;
+    }
+}
+
+void send_head_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo)
+{
+    // Send header information
+    char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
+    dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+    dc_write_fully(env, err, client_socket, "\r\n", 2);
+    dc_free(env, data);
+}
+
+void send_post_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
+    if (httpPacketInfo->response_type == CREATED) {
+        // Send 201 packet
+        char * data = create_201_packet(env, err);
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        dc_free(env, data);
+        return;
+    } else if (httpPacketInfo->response_type == NO_CONTENT) { // NOLINT(llvm-else-after-return,readability-else-after-return)
+        // Send 204 packet
+        char * data = create_204_packet(env, err);
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        dc_free(env, data);
+        return;
+    }
+}
+
+void send_message_handler(const struct dc_env *env, struct dc_error *err, int client_socket, bool *closed, struct http_packet_info * httpPacketInfo)
+{
+    DC_TRACE(env);
+
+    if (httpPacketInfo->error == 1 || httpPacketInfo->response_type == BAD_REQUEST)
+    {
+        printf("BAD REQUEST\n");
+        // Send bad request packet
+        char *data = create_bad_request_packet(env, err);
+        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+        dc_free(env, data);
+    }
+    // If file not found
+    if (httpPacketInfo->response_type == NOT_FOUND) {
+        printf("RESOURCE NOT FOUND\n");
+        // Send 404 packet
+        if (dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
+            char * data = create_404_header_packet(env, err);
+            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+            dc_free(env, data);
+            return;
+        } else { // NOLINT(llvm-else-after-return,readability-else-after-return)
+            char * data = create_404_packet(env, err);
+            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
+            dc_free(env, data);
+        }
+    } else {
+        if (dc_strcmp(env, httpPacketInfo->method, "GET") == 0)   {         // Check if request is GET
+            printf("SENT GET RESPONSE\n");
+            send_get_response(env, err, client_socket, httpPacketInfo);
+        } else if (dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
+            printf("SENT HEAD RESPONSE\n");
+            send_head_response(env, err, client_socket, httpPacketInfo);
+        } else if (dc_strcmp(env, httpPacketInfo->method, "POST") == 0) {
+            printf("SENT POST RESPONSE\n");
+            send_post_response(env, err, client_socket, httpPacketInfo);
+        }
+    }
+
+    // Free memory
+    dc_free(env, httpPacketInfo->method);
+    dc_free(env, httpPacketInfo->path);
+    dc_free(env, httpPacketInfo->data);
+    dc_free(env, httpPacketInfo->file_last_modified);
+    dc_free(env, httpPacketInfo->if_modified_since);
+    if (httpPacketInfo->read_fd != -1) {
+        dc_close(env, err, httpPacketInfo->read_fd);
+    }
+
+    *closed = true;
+}
+
+void save_object(const struct dc_env *env, DBM *db, Object *object)
+{
+    // Convert the key and value to datum objects
+    datum key = {object->key, (int)dc_strlen(env, object->key)};
+    datum value = {object->value, (int)dc_strlen(env, object->value)};
+
+    // Insert the key-value pair into the database
+    int ret = dbm_store(db, key, value, DBM_REPLACE); // NOLINT(concurrency-mt-unsafe)
+    if (ret != 0) {
+        perror("Failed to insert key-value pair into database");
+        return;
+    }
+}
+
+Object * load_object(const struct dc_env *env, struct dc_error *err, DBM* db, char * id) {
+    Object *obj = malloc(sizeof(Object));
+    datum key, value; // NOLINT(readability-isolate-declaration)
+    key.dptr = id;
+    key.dsize = (int)dc_strlen(env, key.dptr);
+    value = dbm_fetch(db, key); // NOLINT(concurrency-mt-unsafe)
+    if (value.dptr != NULL) {
+        obj->key = dc_strdup(env, err, key.dptr);
+        obj->value = malloc(value.dsize + 1);
+        dc_memcpy(env, obj->value, value.dptr, value.dsize);
+        obj->value[value.dsize] = '\0';
+    }
+    return obj;
+}
