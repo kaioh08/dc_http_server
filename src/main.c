@@ -21,24 +21,9 @@
 #include <signal.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
+#include "processes.h"
 #include <sys/stat.h>
 #include <dc_util/io.h>
-#include <ndbm.h>
-
-struct http_packet_info
-{
-    char* method;
-    char* path;
-    char* data;
-    char* file_last_modified;
-    char* if_modified_since;
-
-    __off_t file_size;
-
-    int read_fd;
-    int is_conditional_get;
-    int error;
-};
 
 typedef void (*read_message_func)(const struct dc_env *env, struct dc_error *err, uint8_t **raw_data, int client_socket, struct http_packet_info *packet_info);
 typedef void (*process_message_func)(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo);
@@ -102,7 +87,7 @@ static bool parse_args(const struct dc_env *env, struct dc_error *err, int argc,
 static const char *check_settings(const struct dc_env *env, const struct settings *settings);
 static void usage(const struct dc_env *env, const char *program_name, const struct settings *default_settings, const char *message);
 static void sigint_handler(__attribute__((unused)) int signal);
-static void setup_message_handler(struct message_handler *message_handler);
+static void setup_message_handler(const struct dc_env *env, struct dc_error *err, struct message_handler *message_handler, void *library);
 static bool create_workers(struct dc_env *env, struct dc_error *err, const struct settings *settings, pid_t *workers, sem_t *select_sem, sem_t *domain_sem, const int domain_sockets[2], const int pipe_fds[2]);
 static void initialize_server(const struct dc_env *env, struct dc_error *err, struct server_info *server,  const struct settings *settings, sem_t *domain_sem, int domain_socket, int pipe_fd, pid_t *workers);
 static void destroy_server(const struct dc_env *env, struct dc_error *err, struct server_info *server);
@@ -121,19 +106,20 @@ static void send_revive(const struct dc_env *env, struct dc_error *err, struct w
 static void print_fd(const struct dc_env *env, const char *message, int fd, bool display);
 static void print_socket(const struct dc_env *env, struct dc_error *err, const char *message, int socket, bool display);
 
-char * get_http_time(const struct dc_env *env, struct dc_error *err);
-void read_message_handler(const struct dc_env *env, struct dc_error *err, uint8_t **raw_data, int client_socket, struct http_packet_info * httpPacketInfo);
-void process_message_handler(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo);
-void send_message_handler(const struct dc_env *env, struct dc_error *err, int client_socket, bool *closed, struct http_packet_info * httpPacketInfo);
+//char * get_http_time(const struct dc_env *env, struct dc_error *err);
+//void read_message_handler(const struct dc_env *env, struct dc_error *err, uint8_t **raw_data, int client_socket, struct http_packet_info * httpPacketInfo);
+//void process_message_handler(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo);
+//void send_message_handler(const struct dc_env *env, struct dc_error *err, int client_socket, bool *closed, struct http_packet_info * httpPacketInfo);
 
 
 
 static const int DEFAULT_N_PROCESSES = 2;
-static const int DEFAULT_PORT = 8080;
+static const int DEFAULT_PORT = 80;
 static const int DEFAULT_BACKLOG = SOMAXCONN;
-static const int BLOCK_SIZE = 1024 * 4;
 static volatile sig_atomic_t done = 0;     // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
+static const char * const READ_MESSAGE_FUNC = "read_message_handler";
+static const char * const PROCESS_MESSAGE_FUNC = "process_message_handler";
+static const char * const SEND_MESSAGE_FUNC = "send_message_handler";
 
 int main(int argc, char *argv[])
 {
@@ -144,8 +130,7 @@ int main(int argc, char *argv[])
     struct settings *default_settings;
     struct settings settings;
     const char *error_message;
-
-
+//    tracer = dc_env_default_tracer; // Trace through function calls
     tracer = NULL; // Don't trace through function calls
     err = dc_error_create(false);
     env = dc_env_create(err, true, tracer);
@@ -404,6 +389,7 @@ static const char *check_settings(const struct dc_env *env, const struct setting
 static void usage(const struct dc_env *env, const char *program_name, const struct settings *default_settings, const char *message)
 {
     DC_TRACE(env);
+    // NOLINTBEGIN(cert-err33-c)
     if(message != NULL)
     {
         fprintf(stderr, "%s\n", message);
@@ -411,18 +397,17 @@ static void usage(const struct dc_env *env, const char *program_name, const stru
 
     fprintf(stderr, "Usage: %s [options]\n", program_name);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "\t-l, --library_path     Library (default: %s)\n", default_settings->library_path);
-    fprintf(stderr, "\t-i, --interface        Network interface (default: %s)\n", default_settings->interface);
-    fprintf(stderr, "\t-a, --address          IP address (default: %s)\n", default_settings->address);
-    fprintf(stderr, "\t-p, --port             Port number (default: %d)\n", default_settings->port);
-    fprintf(stderr, "\t-b, --backlog          Backlog size (default: %d)\n", default_settings->backlog);
-    fprintf(stderr, "\t-j, --jobs             Number of handlers (default: %d)\n", default_settings->jobs);
-    fprintf(stderr, "\t-v, --verbose-server   Verbose server (default: %s)\n", default_settings->verbose_server == true ? "on" : "off");
-    fprintf(stderr, "\t-V, --verbose-handler  Verbose handler (default: %s)\n", default_settings->verbose_handler == true ? "on" : "off");
-    fprintf(stderr, "\t-v, --debug-server     Debug server (default: %s)\n", default_settings->debug_server == true ? "on" : "off");
-    fprintf(stderr, "\t-V, --debug-handler    Debug handler (default: %s)\n", default_settings->debug_handler == true ? "on" : "off");
-    fprintf(stderr, "\t-h, --help             Display this help message\n");
-    // NOLINTEND(cert-err33-c)
+    fprintf(stderr, "\t-l, --Library_path          Library (default: %s)\n", default_settings->library_path);
+    fprintf(stderr, "\t-i, --Interface        Network interface (default: %s)\n", default_settings->interface);
+    fprintf(stderr, "\t-a, --Address          IP address (default: %s)\n", default_settings->address);
+    fprintf(stderr, "\t-p, --Port             Port number (default: %d)\n", default_settings->port);
+    fprintf(stderr, "\t-b, --Backlog          Backlog size (default: %d)\n", default_settings->backlog);
+    fprintf(stderr, "\t-j, --Jobs             Number of handlers (default: %d)\n", default_settings->jobs);
+    fprintf(stderr, "\t-v, --Verbose-server   Verbose server (default: %s)\n", default_settings->verbose_server == true ? "on" : "off");
+    fprintf(stderr, "\t-V, --Verbose-handler  Verbose handler (default: %s)\n", default_settings->verbose_handler == true ? "on" : "off");
+    fprintf(stderr, "\t-v, --Debug-server     Debug server (default: %s)\n", default_settings->debug_server == true ? "on" : "off");
+    fprintf(stderr, "\t-V, --Debug-handler    Debug handler (default: %s)\n", default_settings->debug_handler == true ? "on" : "off");
+    fprintf(stderr, "\t-h, --Help             Display this help message\n");
 }
 
 #pragma GCC diagnostic push
@@ -433,16 +418,47 @@ static void sigint_handler(__attribute__((unused)) int signal)
 }
 #pragma GCC diagnostic pop
 
-static void setup_message_handler(struct message_handler *message_handler)
+
+static void setup_message_handler(const struct dc_env *env, struct dc_error *err, struct message_handler *message_handler, void *library)
 {
-    message_handler->reader = read_message_handler;
-    message_handler->processor = process_message_handler;
-    message_handler->sender = send_message_handler;
+    read_message_func    read_func;
+    process_message_func process_func;
+    send_message_func    send_func;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+    read_func = (read_message_func)dc_dlsym(env, err, library, READ_MESSAGE_FUNC);
+#pragma GCC diagnostic pop
+
+    if(dc_error_has_no_error(err))
+    {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+        process_func = (process_message_func) dc_dlsym(env, err, library, PROCESS_MESSAGE_FUNC);
+#pragma GCC diagnostic pop
+
+        if(dc_error_has_no_error(err))
+        {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+            send_func = (send_message_func)dc_dlsym(env, err, library, SEND_MESSAGE_FUNC);
+#pragma GCC diagnostic pop
+
+            if(dc_error_has_no_error(err))
+            {
+                message_handler->reader = read_func;
+                message_handler->processor = process_func;
+                message_handler->sender = send_func;
+            }
+        }
+    }
 }
+
 
 static bool create_workers(struct dc_env *env, struct dc_error *err, const struct settings *settings, pid_t *workers, sem_t *select_sem, sem_t *domain_sem, const int domain_sockets[2], const int pipe_fds[2])
 {
     DC_TRACE(env);
+
 
     for(int i = 0; i < settings->jobs; i++)
     {
@@ -468,8 +484,7 @@ static bool create_workers(struct dc_env *env, struct dc_error *err, const struc
             if(dc_error_has_no_error(err))
             {
                 dc_memset(env, &worker.message_handler, 0, sizeof(worker.message_handler));
-                setup_message_handler(&worker.message_handler);
-
+                setup_message_handler(env, err, &worker.message_handler, library);
                 worker.select_sem = select_sem;
                 worker.domain_sem = domain_sem;
                 worker.domain_socket = domain_sockets[0];
@@ -557,7 +572,7 @@ static void server_loop(const struct dc_env *env, struct dc_error *err, const st
             continue;
         }
 
-        // the increment only happens if the connection isn't closed.
+        // the increment only happens if the connection isn't closed, if it is closed everything moves down one spot.
         for(int i = 0; i < server->num_fds; i++)
         {
             struct pollfd *poll_fd;
@@ -711,7 +726,7 @@ static void revive_socket(const struct dc_env *env, struct dc_error *err, const 
 static void close_connection(const struct dc_env *env, struct dc_error *err, const struct settings *settings, struct server_info *server, int client_socket)
 {
     DC_TRACE(env);
-    print_fd(env, "Closing connection", client_socket, settings->verbose_server);
+    print_fd(env, "Closing", client_socket, settings->verbose_server);
     dc_close(env, err, client_socket);
 
     for(int i = 0; i < server->num_fds; i++)
@@ -752,8 +767,8 @@ static void wait_for_workers(const struct dc_env *env, struct dc_error *err, str
         do
         {
             dc_waitpid(env, err, server->workers[i], &status, WUNTRACED
-#ifdef WCONTINUED
-                    | WCONTINUED
+                                                              #ifdef WCONTINUED
+                                                              | WCONTINUED
 #endif
             );
         }
@@ -779,7 +794,7 @@ static void worker_process(struct dc_env *env, struct dc_error *err, struct work
     }
 
     pid = dc_getpid(env);
-    printf("Started worker (%d)\n", pid);
+    printf("Started Worker (%d)\n", pid);
 
     while(!done)
     {
@@ -870,10 +885,10 @@ static void process_message(const struct dc_env *env, struct dc_error *err, stru
 
         print_fd(env, "Started working on", fd, settings->verbose_handler);
         dc_memset(env, &packet_info, 0, sizeof(packet_info));
-
         raw_data = NULL;
         worker->message_handler.reader(env, err, &raw_data, client_socket, &packet_info);
-        closed = true; // set it to true so if the client forgets to set it the connection
+        closed = true; // set it to true so if the client forgets to set it the connection is closed which is probably bad for some things - making it noticed, also if there is an issue reading/writing probably should close.
+
         if(dc_error_has_no_error(err))
         {
             uint8_t *processed_data;
@@ -943,475 +958,5 @@ static void print_socket(const struct dc_env *env, struct dc_error *err, const c
         printable_address = dc_inet_ntoa(env, peer_address.sin_addr);
         port = dc_ntohs(env, peer_address.sin_port);
         printf("(pid=%d) %s: %s:%d - %d\n", getpid(), message, printable_address, port, socket);
-    }
-}
-/**
- * Get the method from the request
-*/
-void get_method (const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data);
-/**
- * Get the path from the request
- */
-void get_path (const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data);
-/**
- * Tries to open the file requested and stores the status value into the response packet
- */
-void open_file(const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info);
-/**
- * Creates a 404 packet to send to the client
- */
-char * create_404_packet(const struct dc_env *env, struct dc_error *err);
-/**
- * Creates the header to send to the client
-*/
-char * send_header_information(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo, const char * status_code_message);
-/**
- * Copies the content within from_fd to to_fd of count bytes
-*/
-void copy(int from_fd, int to_fd, size_t count);
-/**
- * Creates a 400 packet to send to the client
-*/
-char * create_bad_request_packet(const struct dc_env *env, struct dc_error *err);
-/**
- * Sends the GET response to the client
-*/
-void send_get_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo);
-/**
- * Sends the HEAD response to the client
-*/
-void send_head_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo);
-/**
- * Gets the last modified time of the file
-*/
-char * get_last_modified_time(const struct dc_env *env, struct dc_error *err, const struct http_packet_info *httpPacketInfo);
-char * head_create_404_packet(const struct dc_env *env, struct dc_error *err);
-void check_if_modified_since(const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data);
-void send_get(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo);
-
-#define BUFFER_SIZE 1024
-
-typedef struct {
-    uint32_t id;
-    char *name;
-} Object;
-int save_object(struct dc_env* env, struct dc_error* err, DBM* db, Object* object);
-int load_object(struct dc_env* env, struct dc_error* err, DBM* db, uint32_t id, Object** object);
-
-void read_message_handler(const struct dc_env *env, struct dc_error *err, uint8_t **raw_data, int client_socket, struct http_packet_info * httpPacketInfo)
-{
-    DC_TRACE(env);
-    ssize_t bytes_read;
-    size_t buffer_len;
-    char *buffer;
-
-    buffer_len = BLOCK_SIZE * sizeof(buffer);
-    buffer = dc_malloc(env, err, buffer_len);
-    bytes_read = dc_read(env, err, client_socket, buffer, buffer_len);
-
-    if(dc_error_has_no_error(err))
-    {
-        *raw_data = dc_malloc(env, err, bytes_read);
-        dc_memcpy(env, *raw_data, buffer, bytes_read);
-    }
-    else
-    {
-        *raw_data = NULL;
-    }
-    httpPacketInfo->data = dc_malloc(env, err, bytes_read);
-    httpPacketInfo->data = dc_strdup(env, err, buffer);
-    dc_free(env, buffer);
-}
-
-void get_path (const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data) {
-    char *token;
-
-    // tokenize the line using whitespace as the delimiter
-    token = dc_strtok(env, raw_data, " ");
-
-    // iterate through the tokens until the desired string is found
-    while (token != NULL) {
-        if (dc_strstr(env, token, "/") != NULL) {
-            packet_info->path = dc_malloc(env, err, dc_strlen(env, token));
-            packet_info->path = token;
-            break;
-        }
-        token = dc_strtok(env, NULL, " ");
-    }
-}
-
-void get_method (const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data) {
-    // Get the method of the request
-    //  Example: GET /x HTTP/1.0
-    char * method = dc_strtok(env, raw_data, " ");
-    packet_info->method = dc_malloc(env, err, dc_strlen(env, method));
-    packet_info->method = method;
-}
-
-void check_if_modified_since(const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info, char *raw_data) {
-    char *token;
-
-    // tokenize the line using whitespace as the delimiter
-    token = dc_strtok(env, raw_data, " ");
-
-    // iterate through the tokens until the desired string is found
-    while (token != NULL) {
-        if (dc_strstr(env, token, "If-Modified-Since") != NULL) {
-            packet_info->is_conditional_get = 1;
-
-            // Get the time stamp
-            token = dc_strtok(env, NULL, "\r\n");
-            packet_info->if_modified_since = dc_malloc(env, err, dc_strlen(env, token));
-            packet_info->if_modified_since = token;
-            break;
-        }
-        token = dc_strtok(env, NULL, " ");
-    }
-}
-
-void open_file(const struct dc_env *env, struct dc_error *err, struct http_packet_info *packet_info) {
-    // Check if path is only /
-    if (dc_strcmp(env, packet_info->path, "/") == 0) {
-        // try and open index.html and send that back
-        packet_info->read_fd = open("index.html", O_RDWR);
-        packet_info->path = dc_strdup(env, err, "index.html");
-    } else {
-        // If not append . before and try to open file
-        char * relative_path;
-        relative_path = dc_calloc(env, err, 1, (dc_strlen(env, packet_info->path) + 2));
-        dc_strcat(env, relative_path, ".");
-        dc_strcat(env, relative_path, packet_info->path);
-        dc_strcat(env, relative_path, "\0");
-        packet_info->read_fd = open(relative_path, O_RDWR);
-        packet_info->path = dc_strdup(env, err, relative_path);
-        dc_free(env, relative_path);
-    }
-    // Get file information
-    if (packet_info->read_fd) {
-        struct stat st;
-        stat(packet_info->path, &st);
-
-        time_t last_modified = st.st_mtime;         // Get last modified time
-        struct tm *time_info = gmtime(&last_modified);
-        char buffer[BUFFER_SIZE];
-        strftime(buffer, BUFFER_SIZE, "%a, %d %b %Y %H:%M:%S %Z\r\n", time_info);
-        packet_info->file_last_modified = dc_strdup(env, err, buffer);
-
-        __off_t size = st.st_size; // Get file size
-        packet_info->file_size = size;
-    }
-}
-
-void process_message_handler(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo)
-{
-    DC_TRACE(env);
-
-    printf("String \n%s \n", httpPacketInfo->data);
-
-    // Setup packet info and process the HTTP message Check the method of the request
-    get_method(env, err, httpPacketInfo, dc_strdup(env, err, httpPacketInfo->data));
-
-    if (dc_strcmp(env, httpPacketInfo->method, "GET") == 0 || dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
-        get_path(env, err, httpPacketInfo,dc_strdup(env, err, httpPacketInfo->data));
-        check_if_modified_since(env, err, httpPacketInfo, dc_strdup(env, err, httpPacketInfo->data));
-        open_file(env, err, httpPacketInfo);
-    } else if (dc_strcmp(env, httpPacketInfo->method, "POST") == 0) {
-        // Process POST request here but not done !!!!!!!!!!!!!!!!!!!!!
-    } else {
-        // Not a valid method
-        httpPacketInfo->error = 1;
-    }
-}
-
-char * get_http_time(const struct dc_env *env, struct dc_error *err) {
-    // Get current time
-    char time_stamp[BUFFER_SIZE];
-    time_t now = time(0);
-    struct tm tm = *gmtime(&now);
-    strftime(time_stamp, sizeof time_stamp, "%a, %d %b %Y %H:%M:%S %Z\r\n", &tm);
-
-    // Format time into HTTP format
-    char date[BUFFER_SIZE] = "";
-    dc_strcat(env, date,  "Date: ");
-    dc_strcat(env, date, time_stamp);
-
-    // Return date
-    return dc_strdup(env, err, date);
-}
-
-char * get_last_modified_time(const struct dc_env *env, struct dc_error *err, const struct http_packet_info *httpPacketInfo)
-{
-    // Format time into HTTP format
-    char date[BUFFER_SIZE] = "";
-    dc_strcat(env, date,  "Last-Modified: ");
-    dc_strcat(env, date, httpPacketInfo->file_last_modified);
-
-    // Return date
-    return dc_strdup(env, err, date);
-}
-
-char * create_bad_request_packet(const struct dc_env *env, struct dc_error *err) {
-    char * http_time = get_http_time(env, err);
-    char data[BUFFER_SIZE] = "";
-    dc_strcat(env, data,  "HTTP/1.0 400 BAD REQUEST\r\n");
-    dc_strcat(env, data,  http_time);
-    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
-    dc_strcat(env, data,  "Server: webserver-c\r\n");
-    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
-    dc_strcat(env, data,  "<html>400 BAD REQUEST, ONLY SUPPORTS HTTP 1.0 FUNCTIONS (GET, HEAD, POST)</html>\r\n");
-
-    dc_free(env, http_time);
-    return dc_strdup(env, err, data);
-}
-
-char * create_404_packet(const struct dc_env *env, struct dc_error *err) {
-    char * http_time = get_http_time(env, err);
-    char data[BUFFER_SIZE] = "";
-    dc_strcat(env, data,  "HTTP/1.0 404 NOT FOUND\r\n");
-    dc_strcat(env, data,  http_time);
-    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
-    dc_strcat(env, data,  "Server: webserver-c\r\n");
-    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
-    dc_strcat(env, data,  "<html>404 NOT FOUND</html>\r\n");
-
-    dc_free(env, http_time);
-    return dc_strdup(env, err, data);
-}
-char * head_create_404_packet(const struct dc_env *env, struct dc_error *err) {
-    char * http_time = get_http_time(env, err);
-    char data[BUFFER_SIZE] = "";
-    dc_strcat(env, data,  "HTTP/1.0 404 NOT FOUND\r\n");
-    dc_strcat(env, data,  http_time);
-    dc_strcat(env, data,  "Allow: GET, HEAD, POST\r\n");
-    dc_strcat(env, data,  "Server: webserver-c\r\n");
-    dc_strcat(env, data,  "Content-Type: text/html\r\n\r\n");
-
-    dc_free(env, http_time);
-    return dc_strdup(env, err, data);
-}
-
-void copy(int from_fd, int to_fd, size_t count)
-{
-    char *buffer;
-    ssize_t rbytes;
-
-    buffer = malloc(count);
-
-    if(buffer == NULL)
-    {
-        fprintf(stderr, "Malloc Failed\n");
-        return;
-    }
-
-    while((rbytes = read(from_fd, buffer, count)) > 0)
-    {
-        ssize_t wbytes;
-
-        wbytes = write(to_fd, buffer, rbytes);
-
-        if(wbytes == -1)
-        {
-            fprintf(stderr, "File Write Error\n");
-            return;
-        }
-    }
-
-    if(rbytes == -1)
-    {
-        fprintf(stderr, "File Read Error\n");
-        return;
-    }
-    free(buffer);
-}
-
-char * send_header_information(const struct dc_env *env, struct dc_error *err, struct http_packet_info * httpPacketInfo, const char * status_code_message)
-{
-    char * last_modified_time = get_last_modified_time(env, err, httpPacketInfo);
-
-    // Convert file size to string
-    char * http_time = get_http_time(env, err);
-    char str[20] = "";
-    snprintf(str, sizeof(str), "%lld", (long long) httpPacketInfo->file_size);  // Convert the off_t value to a string
-
-    // Create packet
-    char data[BUFFER_SIZE] = "";
-    dc_strcat(env, data,  "HTTP/1.0 ");
-    dc_strcat(env, data,  status_code_message);
-    dc_strcat(env, data,  "\r\n");
-    dc_strcat(env, data,  http_time);
-    dc_strcat(env, data,  "Server: webserver-c\r\n");
-    dc_strcat(env, data,  last_modified_time);
-    dc_strcat(env, data,  "Content-Length: ");
-    dc_strcat(env, data,  str);
-    dc_strcat(env, data,  "\r\n");
-    dc_strcat(env, data,  "Content-Type: */*\r\n\r\n");
-    printf("RESP: \n%s", data);
-
-    dc_free(env, http_time);
-    return dc_strdup(env, err, data);
-}
-
-void send_get(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
-    // Send file
-    char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
-    dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-    copy(httpPacketInfo->read_fd, client_socket, httpPacketInfo->file_size);
-    dc_write_fully(env, err, client_socket, "\r\n", 2);
-    dc_free(env, data);
-
-}
-
-void send_get_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo) {
-    // Check if request is conditional
-    if (httpPacketInfo->is_conditional_get)
-    {
-        struct tm tm1, tm2;
-        time_t t1, t2;
-
-        // Parse the timestamps into struct tm format
-        if (strptime(httpPacketInfo->if_modified_since, "%a, %d %b %Y %H:%M:%S GMT", &tm1) == NULL) {
-            fprintf(stderr, "Invalid timestamp format: %s\n", httpPacketInfo->if_modified_since);
-            return;
-        }
-        printf("IS MOD: %s \n", httpPacketInfo->file_last_modified);
-        if (strptime(httpPacketInfo->file_last_modified, "%a, %d %b %Y %H:%M:%S GMT", &tm2) == NULL) {
-            fprintf(stderr, "Invalid timestamp format: %s\n", get_last_modified_time(env, err, httpPacketInfo));
-            return;
-        }
-
-        // Convert the timestamps to time_t format
-        t1 = mktime(&tm1);
-        t2 = mktime(&tm2);
-
-        // If not modified since request date send 304
-        // Compare the timestamps
-        if (t2 > t1)
-        {
-            send_get(env, err, client_socket, httpPacketInfo);
-        } else if (t1 > t2)
-        {
-            char * data = send_header_information(env, err, httpPacketInfo, "304 NOT MODIFIED");
-            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-            dc_write_fully(env, err, client_socket, "\r\n", 2);
-            dc_free(env, data);
-            return;
-        } else
-        {
-            char * data = head_create_404_packet(env, err);
-            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-            dc_free(env, data);
-            return;
-        }
-    } else
-    {
-        send_get(env, err, client_socket, httpPacketInfo);
-    }
-}
-
-void send_head_response(const struct dc_env *env, struct dc_error *err, int client_socket, struct http_packet_info *httpPacketInfo)
-{
-    // Send header information
-    char * data = send_header_information(env, err, httpPacketInfo, "200 OK");
-    dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-    dc_write_fully(env, err, client_socket, "\r\n", 2);
-    dc_free(env, data);
-}
-
-void send_message_handler(const struct dc_env *env, struct dc_error *err, int client_socket, bool *closed, struct http_packet_info * httpPacketInfo)
-{
-    DC_TRACE(env);
-
-    if (httpPacketInfo->error == 1)
-    {
-        printf("BAD REQUEST, NOT (GET, POST, HEAD)\n");
-        // Send bad request packet
-        char *data = create_bad_request_packet(env, err);
-        dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-        dc_free(env, data);
-    }
-    // If file not found
-    if (httpPacketInfo->read_fd == -1) {
-        printf("NOT FOUND\n");
-        // Send 404 packet
-        if (dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
-            char * data = head_create_404_packet(env, err);
-            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-            dc_free(env, data);
-            return;
-        } else {
-            char * data = create_404_packet(env, err);
-            dc_write_fully(env, err, client_socket, data, dc_strlen(env, data));
-            dc_free(env, data);
-        }
-    } else {
-        // Check if request is GET
-        if (dc_strcmp(env, httpPacketInfo->method, "GET") == 0)   {
-            send_get_response(env, err, client_socket, httpPacketInfo);
-        } else if (dc_strcmp(env, httpPacketInfo->method, "HEAD") == 0) {
-            send_head_response(env, err, client_socket, httpPacketInfo);
-        }
-    }
-
-    // Free memory
-    dc_free(env, httpPacketInfo->method);
-    dc_free(env, httpPacketInfo->path);
-    dc_free(env, httpPacketInfo->data);
-    close(httpPacketInfo->read_fd);
-
-    *closed = true;
-}
-
-int save_object(struct dc_env* env, struct dc_error* err, DBM* db, Object* object){
-    int error = -1;
-    // serializing the struct into a binary val
-    size_t size = sizeof(object->id) + dc_strlen(env, object->name) + 1;
-    uint8_t* buffer = malloc(size);
-    if (!buffer){
-        fprintf(stderr, "failed to allocate memory in save_object()\n");
-        return error;
-    }
-
-    uint32_t id = htonl(object->id);
-    dc_memcpy(env, buffer, &id, sizeof(object->id));
-    // don't really know if we need name or not
-    dc_strcpy(env, (char*)buffer + sizeof(uint32_t), object->name);
-    datum k, v;
-    k.dptr = (char *)&object->id;
-    k.dsize = sizeof(object->id);
-    v.dptr = buffer;
-    v.dsize = size;
-
-    // store the struct in the database
-    if (dbm_store(db, k , v, DBM_REPLACE) != 0){
-        fprintf(stderr, "failed to store struct struct [save_object()]\n");
-        free(buffer);
-        return error;
-    }
-
-    free(buffer);
-    return 0;
-}
-
-int load_object(struct dc_env* env, struct dc_error* err, DBM* db, uint32_t id, Object** object){
-    int error = -1;
-    // retrieve the struct from the db
-    datum k = {(char*)&id, sizeof(uint32_t)};
-    datum v = dbm_fetch(db, k);
-    if (v.dptr){
-        // deserialize the binary value into a struct
-        uint32_t unpacked_id = ntohl(*(uint32_t*)v.dptr);
-        char* name = (char*)v.dptr + sizeof(uint32_t);
-        *object = malloc(sizeof(Object));
-        if (!*object){
-            fprintf(stderr, "failed to allocate memory [load_object()]");
-            free(v.dptr);
-            return error;
-        }
-        (*object)->id = unpacked_id;
-        (*object)->name = name;
-        return 0;
-    } else {
-        fprintf(stderr, "key not found [load_object()]\n");
-        return error;
     }
 }
