@@ -27,7 +27,7 @@ struct http_packet_info
     char * file_last_modified;
     char * if_modified_since;
 
-    __off_t file_size;
+    off_t file_size;
     long content_length;
 
     int read_fd;
