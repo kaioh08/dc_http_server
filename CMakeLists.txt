@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.0.0)
 
-project(web-server
+project(dc_http_server
         VERSION 0.0.1
         DESCRIPTION ""
         LANGUAGES C)
