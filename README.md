@@ -11,4 +11,3 @@ Server will be able to handle basic HTTP requests, such as GET, HEAD, and POST a
 - Will handle multiple requests concurrently
 - Default port will be 80 but can be overwritten to another port.
 - Will return appropriate status codes and headers for each response.
-- TBD
