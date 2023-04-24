@@ -1,7 +1,7 @@
 # dc_http_server
 
 This repo will implement an HTTP server using C and POSIX. <br>
-Server will be able to handle basic HTTP requests, such as GET, HEAD, and POST and serve static giles such as HTML, CSS, and JavaScript. <br>
+Server will be able to handle basic HTTP requests, such as GET, HEAD, and POST and serve static files such as HTML, CSS, and JavaScript. <br>
 
 <br>
 
